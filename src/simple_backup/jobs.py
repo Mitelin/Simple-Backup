@@ -60,6 +60,7 @@ def execute_job_script(
     environment.update(
         {
             "BACKUP_WORKDIR": str(job_work_dir),
+            "SB_WORK_DIR": str(job_work_dir),
             "BACKUP_TIMESTAMP": timestamp.strftime("%Y%m%dT%H%M%SZ"),
             "BACKUP_NAME": job.name,
             "BACKUP_DEVICE_NAME": device_name,

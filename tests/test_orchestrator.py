@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -60,6 +61,9 @@ class OrchestratorTests(unittest.TestCase):
             self.assertIn("retention_deleted:", log_content)
             self.assertIn("[job:db]", log_content)
             self.assertIn("dump.sql", log_content)
+            with tarfile.open(result.archive_path, mode="r:gz") as archive:
+                archive_names = archive.getnames()
+            self.assertIn("artifacts/db/dump.sql", archive_names)
 
     def test_run_backup_raises_when_job_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

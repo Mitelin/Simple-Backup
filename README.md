@@ -199,6 +199,7 @@ Job je obycejny `.sh` script. Framework ho najde automaticky, pokud:
 Framework jobu preda tyto environment promenne:
 
 - `BACKUP_WORKDIR` cilova pracovni slozka pro artefakty daneho jobu
+- `SB_WORK_DIR` kompatibilni alias na stejny workspace pro starsi joby
 - `BACKUP_TIMESTAMP` cas behu ve formatu `YYYYMMDDTHHMMSSZ`
 - `BACKUP_NAME` nazev jobu odvozeny ze jmena souboru
 - `BACKUP_DEVICE_NAME` jmeno stroje z konfigurace

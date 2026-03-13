@@ -40,6 +40,7 @@ class JobExecutionTests(unittest.TestCase):
                 del command
                 environment = kwargs["env"]
                 workdir = Path(str(environment["BACKUP_WORKDIR"]))
+                self.assertEqual(environment["SB_WORK_DIR"], environment["BACKUP_WORKDIR"])
                 (workdir / "backup.sql").write_text("select 1;", encoding="utf-8")
 
                 class Completed:
