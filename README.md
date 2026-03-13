@@ -212,7 +212,16 @@ Minimalni priklad:
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT="${BACKUP_WORKDIR}/${BACKUP_NAME}-${BACKUP_TIMESTAMP}.txt"
+: "${SB_WORK_DIR:?SB_WORK_DIR is required}"
+: "${BACKUP_NAME:?BACKUP_NAME is required}"
+: "${BACKUP_TIMESTAMP:?BACKUP_TIMESTAMP is required}"
+
+JOB_NAME="${BACKUP_NAME}"
+OUT_DIR="${SB_WORK_DIR}/${JOB_NAME}"
+OUT="${OUT_DIR}/${JOB_NAME}-${BACKUP_TIMESTAMP}.txt"
+
+mkdir -p "${OUT_DIR}"
+
 echo "backup ok" > "$OUT"
 ```
 

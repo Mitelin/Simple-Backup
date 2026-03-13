@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT="${BACKUP_WORKDIR}/${BACKUP_NAME}-${BACKUP_TIMESTAMP}.tar.zst"
+: "${SB_WORK_DIR:?SB_WORK_DIR is required}"
+: "${BACKUP_NAME:?BACKUP_NAME is required}"
+: "${BACKUP_TIMESTAMP:?BACKUP_TIMESTAMP is required}"
+
+JOB_NAME="${BACKUP_NAME}"
+OUT_DIR="${SB_WORK_DIR}/${JOB_NAME}"
+OUT="${OUT_DIR}/${JOB_NAME}-${BACKUP_TIMESTAMP}.tar.zst"
+
+mkdir -p "${OUT_DIR}"
 
 tar --zstd -cf "$OUT" /srv/app /etc/nginx
