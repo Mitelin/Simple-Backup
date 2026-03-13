@@ -1,0 +1,9 @@
+zaloha.md
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+tmp/
+logs/
+.DS_Store
