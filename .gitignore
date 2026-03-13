@@ -6,4 +6,5 @@ __pycache__/
 *.pyd
 tmp/
 logs/
+output/
 .DS_Store

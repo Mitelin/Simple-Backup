@@ -1,0 +1,32 @@
+device:
+  name: myserver
+
+storage:
+  target_root: ./output
+  require_mount: false
+
+retention:
+  daily: 7
+  weekly: 4
+  monthly: 12
+  yearly: 10
+
+runtime:
+  jobs_dir: ./jobs
+  work_dir: ./tmp
+  log_dir: ./logs
+  job_timeout_seconds: 3600
+
+notifications:
+  email:
+    enabled: false
+    smtp_host: smtp.example.com
+    smtp_port: 587
+    smtp_username: backup@example.com
+    smtp_password: change-me
+    smtp_from: backup@example.com
+    smtp_to:
+      - admin@example.com
+    use_starttls: true
+    use_ssl: false
+    subject_prefix: "[Simple Backup]"

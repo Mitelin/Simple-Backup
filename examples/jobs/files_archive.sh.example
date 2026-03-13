@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUT="${BACKUP_WORKDIR}/${BACKUP_NAME}-${BACKUP_TIMESTAMP}.tar.zst"
+
+tar --zstd -cf "$OUT" /srv/app /etc/nginx
