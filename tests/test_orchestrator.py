@@ -147,7 +147,7 @@ class RetentionTests(unittest.TestCase):
                 result = run_backup(config)
 
             remaining = sorted(path.name for path in config.storage.target_root.glob("*.tar.gz"))
-            self.assertEqual(len(remaining), 3)
+            self.assertEqual(len(remaining), 4)
             self.assertIn(result.archive_path.name, remaining)
             log_content = result.log_file.read_text(encoding="utf-8")
             self.assertIn("retention_deleted:", log_content)

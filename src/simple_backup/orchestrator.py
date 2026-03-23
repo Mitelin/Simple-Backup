@@ -9,7 +9,7 @@ from simple_backup.archive import build_archive_name, create_final_archive
 from simple_backup.config import AppConfig
 from simple_backup.jobs import JobDefinition, JobExecutionResult, discover_job_scripts, execute_job_script
 from simple_backup.notifications import NotificationError, send_failure_email
-from simple_backup.retention import RetentionOutcome, apply_retention
+from simple_backup.retention import ArchiveEntry, RetentionOutcome, apply_retention
 
 
 class BackupError(RuntimeError):
@@ -60,7 +60,11 @@ def run_backup(config: AppConfig) -> RunResult:
         overall_success = all(result.success for result in job_results) if job_results else True
         archive_path = config.storage.target_root / build_archive_name(config.device.name, timestamp)
         retention = apply_retention(
-            config.storage.target_root, config.device.name, config.retention, protected_paths={archive_path.resolve()}
+            config.storage.target_root,
+            config.device.name,
+            config.retention,
+            protected_paths={archive_path.resolve()},
+            pending_entries=[ArchiveEntry(path=archive_path, timestamp=timestamp)],
         )
         log_file.write_text(
             _render_run_log(config, run_id, discovered_jobs, job_results, overall_success, retention),
