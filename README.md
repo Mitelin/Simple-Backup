@@ -145,6 +145,7 @@ Sekce `runtime`:
 
 - `jobs_dir` slozka s realnymi job scripti
 - `work_dir` docasny pracovni adresar pro artefakty jednoho behu
+- soubezne behy nad stejnym `work_dir` jsou odmitnuty lockem, aby si nesdilely staging
 - `log_dir` adresar s logy jednotlivych behu
 - `job_timeout_seconds` timeout pro jeden job script
 

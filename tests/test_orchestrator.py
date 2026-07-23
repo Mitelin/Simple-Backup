@@ -5,16 +5,25 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 from simple_backup.archive import build_archive_name
 from simple_backup.config import default_config
 from simple_backup.jobs import JobDefinition, JobExecutionResult
-from simple_backup.orchestrator import BackupError, _cleanup_run_dir, run_backup
+from simple_backup.orchestrator import BackupError, _WORK_DIR_LOCK_FILE_NAME, _cleanup_run_dir, run_backup
 
 
 class OrchestratorTests(unittest.TestCase):
+    def _work_dir_entries_without_lock(self, config) -> list[Path]:
+        if not config.runtime.work_dir.exists():
+            return []
+        return sorted(
+            (path for path in config.runtime.work_dir.iterdir() if path.name != _WORK_DIR_LOCK_FILE_NAME),
+            key=lambda path: path.name,
+        )
+
     def _make_config(self, root: Path):
         config = default_config()
         return replace(
@@ -106,7 +115,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(send_failure_email_mock.call_args.kwargs["script_name"], "db.sh")
             self.assertIn("Backup failed for script db.sh", send_failure_email_mock.call_args.kwargs["error_message"])
             self.assertTrue(config.runtime.work_dir.exists())
-            self.assertEqual(list(config.runtime.work_dir.iterdir()), [])
+            self.assertEqual(self._work_dir_entries_without_lock(config), [])
 
     def test_run_backup_removes_only_current_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -161,7 +170,76 @@ class OrchestratorTests(unittest.TestCase):
                     run_backup(config)
 
             self.assertTrue(config.runtime.work_dir.exists())
-            self.assertEqual(list(config.runtime.work_dir.iterdir()), [])
+            self.assertEqual(self._work_dir_entries_without_lock(config), [])
+
+    def test_run_backup_rejects_concurrent_run_for_same_work_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self._make_config(root)
+            job = self._successful_job(config)
+            first_run_ready = threading.Event()
+            release_first_run = threading.Event()
+            first_run_result: dict[str, object] = {}
+
+            def holding_execute(job_definition: JobDefinition, **kwargs: object) -> JobExecutionResult:
+                result = self._successful_job_result(job_definition, **kwargs)
+                first_run_ready.set()
+                self.assertTrue(release_first_run.wait(timeout=5))
+                return result
+
+            def run_first_backup() -> None:
+                try:
+                    first_run_result["result"] = run_backup(config)
+                except Exception as error:  # pragma: no cover - assertion path
+                    first_run_result["error"] = error
+
+            with patch("simple_backup.orchestrator.discover_job_scripts", return_value=[job]), patch(
+                "simple_backup.orchestrator.execute_job_script", side_effect=holding_execute
+            ):
+                first_thread = threading.Thread(target=run_first_backup)
+                first_thread.start()
+                self.assertTrue(first_run_ready.wait(timeout=5))
+
+                active_entries = self._work_dir_entries_without_lock(config)
+                self.assertEqual(len(active_entries), 1)
+                first_run_dir = active_entries[0]
+                staged_file = first_run_dir / "artifacts" / "db" / "dump.sql"
+                self.assertTrue(staged_file.exists())
+                staged_content = staged_file.read_text(encoding="utf-8")
+
+                with self.assertRaisesRegex(BackupError, "Another backup run is already active"):
+                    run_backup(config)
+
+                self.assertTrue(staged_file.exists())
+                self.assertEqual(staged_file.read_text(encoding="utf-8"), staged_content)
+                self.assertEqual(self._work_dir_entries_without_lock(config), [first_run_dir])
+
+                release_first_run.set()
+                first_thread.join(timeout=5)
+
+            self.assertFalse(first_thread.is_alive())
+            self.assertNotIn("error", first_run_result)
+            self.assertIn("result", first_run_result)
+
+    def test_run_backup_releases_lock_after_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = self._make_config(root)
+            job = self._successful_job(config)
+
+            with patch("simple_backup.orchestrator.discover_job_scripts", return_value=[job]), patch(
+                "simple_backup.orchestrator.execute_job_script", side_effect=RuntimeError("job boom")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "job boom"):
+                    run_backup(config)
+
+            with patch("simple_backup.orchestrator.discover_job_scripts", return_value=[job]), patch(
+                "simple_backup.orchestrator.execute_job_script", side_effect=self._successful_job_result
+            ):
+                result = run_backup(config)
+
+            self.assertTrue(result.archive_path.exists())
+            self.assertEqual(self._work_dir_entries_without_lock(config), [])
 
     def test_cleanup_rejects_symlinked_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -244,7 +322,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(len(log_files), 1)
             self.assertIn("cleanup boom", log_files[0].read_text(encoding="utf-8"))
             self.assertIn("cleanup boom", send_failure_email_mock.call_args.kwargs["error_message"])
-            self.assertEqual(len(list(config.runtime.work_dir.iterdir())), 1)
+            self.assertEqual(len(self._work_dir_entries_without_lock(config)), 1)
 
     def test_run_backup_sends_notification_for_non_job_exception(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

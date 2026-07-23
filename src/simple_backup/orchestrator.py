@@ -3,8 +3,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO, Iterator
+import contextlib
+import errno
 import os
 import shutil
+import threading
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback is exercised instead.
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - Linux uses fcntl.
+    msvcrt = None
 
 from simple_backup.archive import build_archive_name, create_final_archive
 from simple_backup.config import AppConfig
@@ -15,6 +29,11 @@ from simple_backup.retention import ArchiveEntry, RetentionOutcome, apply_retent
 
 class BackupError(RuntimeError):
     pass
+
+
+_WORK_DIR_LOCK_FILE_NAME = ".simple-backup.lock"
+_ACTIVE_WORK_DIRS: set[Path] = set()
+_ACTIVE_WORK_DIRS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,8 +54,8 @@ class RunResult:
 
 def run_backup(config: AppConfig) -> RunResult:
     timestamp = datetime.now(timezone.utc)
-    run_id = timestamp.strftime("%Y%m%dT%H%M%SZ")
-    log_file = config.runtime.log_dir / f"{run_id}.log"
+    run_id = "unassigned"
+    log_file: Path | None = None
     run_dir: Path | None = None
     artifacts_dir = config.runtime.work_dir / run_id / "artifacts"
     discovered_jobs: list[JobDefinition] = []
@@ -49,70 +68,75 @@ def run_backup(config: AppConfig) -> RunResult:
     cleanup_error: Exception | None = None
 
     try:
-        _ensure_storage_ready(config.storage.target_root, config.storage.require_mount)
-        config.runtime.work_dir.mkdir(parents=True, exist_ok=True)
-        config.runtime.log_dir.mkdir(parents=True, exist_ok=True)
+        with _hold_work_dir_lock(config.runtime.work_dir):
+            _ensure_storage_ready(config.storage.target_root, config.storage.require_mount)
+            timestamp = datetime.now(timezone.utc)
+            run_id = timestamp.strftime("%Y%m%dT%H%M%SZ")
+            log_file = config.runtime.log_dir / f"{run_id}.log"
+            archive_path = config.storage.target_root / build_archive_name(config.device.name, timestamp)
+            config.runtime.log_dir.mkdir(parents=True, exist_ok=True)
 
-        run_dir = config.runtime.work_dir / run_id
-        artifacts_dir = run_dir / "artifacts"
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
+            run_dir = config.runtime.work_dir / run_id
+            artifacts_dir = run_dir / "artifacts"
+            try:
+                artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-        discovered_jobs = discover_job_scripts(config.runtime.jobs_dir)
-        for job in discovered_jobs:
-            current_job = job
-            job_result = execute_job_script(
-                job,
-                device_name=config.device.name,
-                timestamp=timestamp,
-                target_root=config.storage.target_root,
-                timeout_seconds=config.runtime.job_timeout_seconds,
-                job_work_dir=artifacts_dir / job.name,
-            )
-            job_results.append(job_result)
-            if not job_result.success:
-                break
+                discovered_jobs = discover_job_scripts(config.runtime.jobs_dir)
+                for job in discovered_jobs:
+                    current_job = job
+                    job_result = execute_job_script(
+                        job,
+                        device_name=config.device.name,
+                        timestamp=timestamp,
+                        target_root=config.storage.target_root,
+                        timeout_seconds=config.runtime.job_timeout_seconds,
+                        job_work_dir=artifacts_dir / job.name,
+                    )
+                    job_results.append(job_result)
+                    if not job_result.success:
+                        break
 
-        overall_success = all(result.success for result in job_results) if job_results else True
-        retention = apply_retention(
-            config.storage.target_root,
-            config.device.name,
-            config.retention,
-            protected_paths={archive_path.resolve()},
-            pending_entries=[ArchiveEntry(path=archive_path, timestamp=timestamp)],
-        )
-        log_file.write_text(
-            _render_run_log(config, run_id, discovered_jobs, job_results, overall_success, retention),
-            encoding="utf-8",
-        )
+                overall_success = all(result.success for result in job_results) if job_results else True
+                retention = apply_retention(
+                    config.storage.target_root,
+                    config.device.name,
+                    config.retention,
+                    protected_paths={archive_path.resolve()},
+                    pending_entries=[ArchiveEntry(path=archive_path, timestamp=timestamp)],
+                )
+                log_file.write_text(
+                    _render_run_log(config, run_id, discovered_jobs, job_results, overall_success, retention),
+                    encoding="utf-8",
+                )
 
-        archive_path = create_final_archive(
-            artifacts_dir=artifacts_dir,
-            log_file=log_file,
-            archive_path=archive_path,
-        )
+                archive_path = create_final_archive(
+                    artifacts_dir=artifacts_dir,
+                    log_file=log_file,
+                    archive_path=archive_path,
+                )
 
-        if not overall_success:
-            failed_job = next((result for result in reversed(job_results) if not result.success), None)
-            failed_script = failed_job.job.script_path.name if failed_job is not None else "unknown.sh"
-            raise BackupError(
-                f"Backup failed for script {failed_script} on {config.device.name} with log {log_file}"
-            )
+                if not overall_success:
+                    failed_job = next((result for result in reversed(job_results) if not result.success), None)
+                    failed_script = failed_job.job.script_path.name if failed_job is not None else "unknown.sh"
+                    raise BackupError(
+                        f"Backup failed for script {failed_script} on {config.device.name} with log {log_file}"
+                    )
 
-        result = RunResult(
-            archive_path=archive_path,
-            log_file=log_file,
-            artifacts_dir=artifacts_dir,
-            job_results=job_results,
-            retention=retention,
-        )
+                result = RunResult(
+                    archive_path=archive_path,
+                    log_file=log_file,
+                    artifacts_dir=artifacts_dir,
+                    job_results=job_results,
+                    retention=retention,
+                )
+            finally:
+                if run_dir is not None and run_dir.exists():
+                    try:
+                        _cleanup_run_dir(config, run_dir)
+                    except Exception as error:
+                        cleanup_error = error
     except Exception as error:
         backup_error = error
-    finally:
-        if run_dir is not None and run_dir.exists():
-            try:
-                _cleanup_run_dir(config, run_dir)
-            except Exception as error:
-                cleanup_error = error
 
     if backup_error is not None:
         _record_run_failure(config, log_file, run_id, discovered_jobs, job_results, backup_error, cleanup_error)
@@ -197,13 +221,16 @@ def _indent_block(value: str) -> list[str]:
 
 def _record_run_failure(
     config: AppConfig,
-    log_file: Path,
+    log_file: Path | None,
     run_id: str,
     discovered_jobs: list[JobDefinition],
     job_results: list[JobExecutionResult],
     error: Exception,
     cleanup_error: Exception | None = None,
 ) -> None:
+    if log_file is None:
+        return
+
     if log_file.exists():
         _append_failure_details(log_file, error, cleanup_error)
         return
@@ -259,6 +286,81 @@ def _format_failure_message(error: Exception, cleanup_error: Exception | None = 
     if cleanup_error is not None:
         return f"{message} | Cleanup failed: {cleanup_error}"
     return message
+
+
+@contextlib.contextmanager
+def _hold_work_dir_lock(work_dir: Path) -> Iterator[Path]:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    resolved_work_dir = work_dir.resolve(strict=True)
+    lock_file = resolved_work_dir / _WORK_DIR_LOCK_FILE_NAME
+
+    with _ACTIVE_WORK_DIRS_GUARD:
+        if resolved_work_dir in _ACTIVE_WORK_DIRS:
+            raise BackupError(f"Another backup run is already active for work_dir {resolved_work_dir}")
+        _ACTIVE_WORK_DIRS.add(resolved_work_dir)
+
+    handle = lock_file.open("a+b")
+    try:
+        _acquire_work_dir_lock(handle, resolved_work_dir)
+    except Exception:
+        handle.close()
+        with _ACTIVE_WORK_DIRS_GUARD:
+            _ACTIVE_WORK_DIRS.discard(resolved_work_dir)
+        raise
+
+    try:
+        yield lock_file
+    finally:
+        release_error: Exception | None = None
+        try:
+            _release_work_dir_lock(handle)
+        except Exception as error:
+            release_error = error
+        finally:
+            handle.close()
+            with _ACTIVE_WORK_DIRS_GUARD:
+                _ACTIVE_WORK_DIRS.discard(resolved_work_dir)
+
+        if release_error is not None:
+            raise release_error
+
+
+def _acquire_work_dir_lock(handle: BinaryIO, resolved_work_dir: Path) -> None:
+    if fcntl is not None:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EAGAIN}:
+                raise BackupError(f"Another backup run is already active for work_dir {resolved_work_dir}") from error
+            raise
+        return
+
+    if msvcrt is not None:
+        handle.seek(0)
+        if handle.read(1) == b"":
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as error:
+            raise BackupError(f"Another backup run is already active for work_dir {resolved_work_dir}") from error
+        return
+
+    raise BackupError("No supported file locking backend is available on this platform")
+
+
+def _release_work_dir_lock(handle: BinaryIO) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+
+    if msvcrt is not None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    raise BackupError("No supported file locking backend is available on this platform")
 
 
 def _cleanup_run_dir(config: AppConfig, run_dir: Path) -> None:
