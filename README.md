@@ -240,7 +240,7 @@ Po jednom runu vzniknou tyto vystupy:
 
 - jeden finalni archiv v `storage.target_root`
 - jeden log soubor v `runtime.log_dir`
-- docasne artefakty v `runtime.work_dir`
+- docasne artefakty v `runtime.work_dir`, ktere se po kazdem uspesnem i neuspesnem behu odstrani; zachova se jen root `runtime.work_dir`
 
 Finalni archiv obsahuje:
 
