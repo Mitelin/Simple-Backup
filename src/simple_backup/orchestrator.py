@@ -299,30 +299,37 @@ def _hold_work_dir_lock(work_dir: Path) -> Iterator[Path]:
             raise BackupError(f"Another backup run is already active for work_dir {resolved_work_dir}")
         _ACTIVE_WORK_DIRS.add(resolved_work_dir)
 
-    handle = lock_file.open("a+b")
     try:
-        _acquire_work_dir_lock(handle, resolved_work_dir)
-    except Exception:
-        handle.close()
+        handle: BinaryIO | None = None
+        lock_acquired = False
+        try:
+            handle = lock_file.open("a+b")
+            _acquire_work_dir_lock(handle, resolved_work_dir)
+            lock_acquired = True
+            yield lock_file
+        finally:
+            release_error: Exception | None = None
+            close_error: Exception | None = None
+
+            if lock_acquired and handle is not None:
+                try:
+                    _release_work_dir_lock(handle)
+                except Exception as error:
+                    release_error = error
+
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception as error:
+                    close_error = error
+
+            if release_error is not None:
+                raise release_error
+            if close_error is not None:
+                raise close_error
+    finally:
         with _ACTIVE_WORK_DIRS_GUARD:
             _ACTIVE_WORK_DIRS.discard(resolved_work_dir)
-        raise
-
-    try:
-        yield lock_file
-    finally:
-        release_error: Exception | None = None
-        try:
-            _release_work_dir_lock(handle)
-        except Exception as error:
-            release_error = error
-        finally:
-            handle.close()
-            with _ACTIVE_WORK_DIRS_GUARD:
-                _ACTIVE_WORK_DIRS.discard(resolved_work_dir)
-
-        if release_error is not None:
-            raise release_error
 
 
 def _acquire_work_dir_lock(handle: BinaryIO, resolved_work_dir: Path) -> None:

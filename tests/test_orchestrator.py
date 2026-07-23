@@ -7,12 +7,19 @@ import tarfile
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from simple_backup.archive import build_archive_name
 from simple_backup.config import default_config
 from simple_backup.jobs import JobDefinition, JobExecutionResult
-from simple_backup.orchestrator import BackupError, _WORK_DIR_LOCK_FILE_NAME, _cleanup_run_dir, run_backup
+from simple_backup.orchestrator import (
+    BackupError,
+    _ACTIVE_WORK_DIRS,
+    _WORK_DIR_LOCK_FILE_NAME,
+    _cleanup_run_dir,
+    _hold_work_dir_lock,
+    run_backup,
+)
 
 
 class OrchestratorTests(unittest.TestCase):
@@ -240,6 +247,51 @@ class OrchestratorTests(unittest.TestCase):
 
             self.assertTrue(result.archive_path.exists())
             self.assertEqual(self._work_dir_entries_without_lock(config), [])
+
+    def test_hold_work_dir_lock_clears_guard_after_open_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "tmp"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            resolved_work_dir = work_dir.resolve(strict=True)
+
+            with patch("pathlib.Path.open", side_effect=OSError("open boom")):
+                with self.assertRaisesRegex(OSError, "open boom"):
+                    with _hold_work_dir_lock(work_dir):
+                        self.fail("lock acquisition should fail before entering the context")
+
+            self.assertNotIn(resolved_work_dir, _ACTIVE_WORK_DIRS)
+
+            with _hold_work_dir_lock(work_dir):
+                self.assertIn(resolved_work_dir, _ACTIVE_WORK_DIRS)
+
+            self.assertNotIn(resolved_work_dir, _ACTIVE_WORK_DIRS)
+
+    def test_hold_work_dir_lock_clears_guard_after_release_and_close_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "tmp"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            resolved_work_dir = work_dir.resolve(strict=True)
+
+            with patch("simple_backup.orchestrator._release_work_dir_lock", side_effect=OSError("unlock boom")), patch(
+                "simple_backup.orchestrator._acquire_work_dir_lock"
+            ):
+                with self.assertRaisesRegex(OSError, "unlock boom"):
+                    with _hold_work_dir_lock(work_dir):
+                        self.assertIn(resolved_work_dir, _ACTIVE_WORK_DIRS)
+
+            self.assertNotIn(resolved_work_dir, _ACTIVE_WORK_DIRS)
+
+            handle = MagicMock()
+            handle.close.side_effect = OSError("close boom")
+
+            with patch("pathlib.Path.open", return_value=handle), patch(
+                "simple_backup.orchestrator._acquire_work_dir_lock"
+            ), patch("simple_backup.orchestrator._release_work_dir_lock"):
+                with self.assertRaisesRegex(OSError, "close boom"):
+                    with _hold_work_dir_lock(work_dir):
+                        self.assertIn(resolved_work_dir, _ACTIVE_WORK_DIRS)
+
+            self.assertNotIn(resolved_work_dir, _ACTIVE_WORK_DIRS)
 
     def test_cleanup_rejects_symlinked_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
